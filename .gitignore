@@ -1,9 +1,9 @@
 node_modules
-.vercel
-.tanstack
-.grok
-screenshots
-artifacts
 dist
-*.log
+.output
+.vercel
+.env
+.env.*
+!.env.example
+*.local
 .DS_Store
