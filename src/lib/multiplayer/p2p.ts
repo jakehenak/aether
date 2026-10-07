@@ -474,7 +474,7 @@ export class P2PRoom {
     }
   }
 
-  // ── diagnostics + recovery ─────────────────────────────────────────────────────
+  // ── diagnostics + recovery ───────────────────────────────────────────────────────
 
   private pingAll(): void {
     const wire = JSON.stringify({ t: "ping" });
