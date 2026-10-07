@@ -10,16 +10,21 @@ import {
 
 export type TrailPoint = { x: number; y: number; life: number };
 
-export type FieldVisual = {
+export type HandVisual = {
   x: number;
   y: number;
   vol: number;
   over: boolean;
-  seen: boolean;
   audible: boolean;
+  trail: TrailPoint[];
+};
+
+export type FieldVisual = {
+  hands: HandVisual[];
+  /** Last pitch when every finger has lifted, so the scale keeps its mark. */
+  focusX: number | null;
   muted: boolean;
   reduceMotion: boolean;
-  trail: TrailPoint[];
 };
 
 type Palette = {
@@ -110,8 +115,9 @@ export function drawField(canvas: HTMLCanvasElement, visual: FieldVisual): void 
   }
   ctx.restore();
 
-  const pitch = describeX(visual.x);
-  const showHand = visual.seen && visual.over;
+  const overHands = visual.hands.filter((hand) => hand.over);
+  const markXs = overHands.length > 0 ? overHands.map((hand) => hand.x) : visual.focusX == null ? [] : [visual.focusX];
+  const markMidis = new Set(markXs.map((x) => describeX(x).midi));
   const colW = w / RANGE;
 
   for (let midi = MIN_MIDI; midi <= MAX_MIDI; midi++) {
@@ -126,9 +132,13 @@ export function drawField(canvas: HTMLCanvasElement, visual: FieldVisual): void 
     ctx.stroke();
   }
 
-  if (visual.seen) {
-    const colX = ((pitch.midi - MIN_MIDI) / RANGE) * w - colW / 2;
-    ctx.fillStyle = withAlpha(palette.brass, showHand && pitch.inTune ? 0.2 : 0.09);
+  for (const midi of markMidis) {
+    const colX = ((midi - MIN_MIDI) / RANGE) * w - colW / 2;
+    const inTune = overHands.some((hand) => {
+      const pitch = describeX(hand.x);
+      return pitch.midi === midi && pitch.inTune && hand.audible;
+    });
+    ctx.fillStyle = withAlpha(palette.brass, inTune ? 0.18 : 0.09);
     ctx.fillRect(colX, 0, colW, h);
   }
 
@@ -151,7 +161,7 @@ export function drawField(canvas: HTMLCanvasElement, visual: FieldVisual): void 
     const accidental = isAccidental(midi);
     const isC = midi % 12 === 0;
     const x = ((midi - MIN_MIDI) / RANGE) * w;
-    const active = visual.seen && midi === pitch.midi;
+    const active = markMidis.has(midi);
     const tickTop = accidental ? stripTop + 26 : isC ? stripTop - 12 : stripTop + 10;
     const tickBottom = stripTop + 34;
     ctx.beginPath();
@@ -177,53 +187,59 @@ export function drawField(canvas: HTMLCanvasElement, visual: FieldVisual): void 
     ctx.fillText(label, tx, h - 16);
   }
 
-  if (!showHand) return;
+  if (overHands.length === 0) return;
 
-  const px = visual.x * w;
-  const py = Math.min(visual.y * h, h - 8);
+  const crowd = Math.min(1, (overHands.length - 1) / 9);
 
-  if (!visual.reduceMotion) {
-    for (const point of visual.trail) {
-      ctx.fillStyle = withAlpha(palette.brass, 0.18 * point.life);
-      ctx.beginPath();
-      ctx.arc(point.x * w, Math.min(point.y * h, h - 8), 5 * point.life, 0, Math.PI * 2);
-      ctx.fill();
+  for (let index = 0; index < overHands.length; index++) {
+    const hand = overHands[index];
+    const lead = index === overHands.length - 1;
+    const px = hand.x * w;
+    const py = Math.min(hand.y * h, h - 8);
+
+    if (!visual.reduceMotion) {
+      for (const point of hand.trail) {
+        ctx.fillStyle = withAlpha(palette.brass, 0.16 * point.life);
+        ctx.beginPath();
+        ctx.arc(point.x * w, Math.min(point.y * h, h - 8), 5 * point.life, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
-  }
 
-  ctx.strokeStyle = withAlpha(palette.brass, visual.audible ? 0.45 : 0.22);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(Math.round(px) + 0.5, 0);
-  ctx.lineTo(Math.round(px) + 0.5, stripTop);
-  ctx.stroke();
-
-  if (py < stripTop) {
-    ctx.strokeStyle = withAlpha(palette.brass, 0.28);
+    ctx.strokeStyle = withAlpha(palette.brass, hand.audible ? (lead ? 0.45 : 0.28) : 0.18);
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, Math.round(py) + 0.5);
-    ctx.lineTo(w, Math.round(py) + 0.5);
+    ctx.moveTo(Math.round(px) + 0.5, 0);
+    ctx.lineTo(Math.round(px) + 0.5, stripTop);
+    ctx.stroke();
+
+    if (lead && py < stripTop) {
+      ctx.strokeStyle = withAlpha(palette.brass, 0.28);
+      ctx.beginPath();
+      ctx.moveTo(0, Math.round(py) + 0.5);
+      ctx.lineTo(w, Math.round(py) + 0.5);
+      ctx.stroke();
+    }
+
+    const glowR = (16 + hand.vol * 54) * (1 - crowd * 0.45);
+    const glow = ctx.createRadialGradient(px, py, 0, px, py, glowR);
+    const glowStrength = visual.muted ? 0.1 : hand.audible ? (lead ? 0.42 : 0.28) : 0.18;
+    glow.addColorStop(0, withAlpha(palette.brass, glowStrength));
+    glow.addColorStop(1, withAlpha(palette.brass, 0));
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(px, py, glowR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = visual.muted ? withAlpha(palette.brass, 0.45) : palette.brass;
+    ctx.beginPath();
+    ctx.arc(px, py, lead ? 6 : 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = withAlpha(palette.ivory, lead ? 0.85 : 0.55);
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.arc(px, py, (lead ? 11 : 9) + hand.vol * (lead ? 6 : 4), 0, Math.PI * 2);
     ctx.stroke();
   }
-
-  const glowR = 16 + visual.vol * 54;
-  const glow = ctx.createRadialGradient(px, py, 0, px, py, glowR);
-  const glowStrength = visual.muted ? 0.12 : visual.audible ? 0.42 : 0.22;
-  glow.addColorStop(0, withAlpha(palette.brass, glowStrength));
-  glow.addColorStop(1, withAlpha(palette.brass, 0));
-  ctx.fillStyle = glow;
-  ctx.beginPath();
-  ctx.arc(px, py, glowR, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = visual.muted ? withAlpha(palette.brass, 0.45) : palette.brass;
-  ctx.beginPath();
-  ctx.arc(px, py, 6, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.strokeStyle = withAlpha(palette.ivory, 0.85);
-  ctx.lineWidth = 1.25;
-  ctx.beginPath();
-  ctx.arc(px, py, 11 + visual.vol * 6, 0, Math.PI * 2);
-  ctx.stroke();
 }
