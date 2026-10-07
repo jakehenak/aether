@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Fraunces", "Iowan Old Style", Palatino, "Palatino Linotype", serif;
+  --font-sans: "Outfit", system-ui, sans-serif;
+  --color-bg: #0e0d0b;
+  --color-surface: #1c1914;
+  --color-field: #100e0c;
+  --color-fg: #f4efe6;
+  --color-muted: #b7ad9f;
+  --color-line: #3d362c;
+  --color-brass: #e0a04a;
+  --color-ink: #16130e;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: var(--color-fg);
+    background-color: var(--color-bg);
+    background-image: radial-gradient(
+      ellipse 90% 42% at 50% -8%,
+      color-mix(in srgb, var(--color-brass) 16%, transparent),
+      transparent 58%
+    );
+    min-height: 100dvh;
+    overscroll-behavior: none;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brass);
+    outline-offset: 3px;
+  }
+
+  ::selection {
+    background: var(--color-brass);
+    color: var(--color-ink);
+  }
+}
+
+.play-field {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.reverb-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2.75rem;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reverb-slider::-webkit-slider-runnable-track {
+  height: 0.25rem;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+
+.reverb-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: -0.5rem;
+  border-radius: 999px;
+  background: var(--color-brass);
+  border: 2px solid var(--color-ink);
+}
+
+.reverb-slider::-moz-range-track {
+  height: 0.25rem;
+  border-radius: 999px;
+  background: var(--color-line);
+}
+
+.reverb-slider::-moz-range-thumb {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 999px;
+  background: var(--color-brass);
+  border: 2px solid var(--color-ink);
+}
+
+@keyframes aether-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.82);
+  }
+}
+
+.live-dot {
+  animation: aether-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
