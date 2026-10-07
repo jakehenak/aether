@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { Volume2, VolumeX } from "lucide-react";
-import { drawField, type TrailPoint } from "@/components/draw-field";
+import { drawField, type HandVisual, type TrailPoint } from "@/components/draw-field";
 import {
   clamp01,
   describeX,
   pointerToVol,
   tunePhrase,
 } from "@/lib/pitch";
-import { ThereminEngine, WAVE_NAMES, type WaveName } from "@/lib/theremin-audio";
+import { MAX_VOICES, ThereminEngine, WAVE_NAMES, type WaveName } from "@/lib/theremin-audio";
 
 const STORAGE_KEY = "aether-theremin";
 
@@ -26,17 +26,19 @@ const WAVE_PATH: Record<WaveName, string> = {
   square: "M2 16 V8 H12 V16 H22 V8 H30",
 };
 
-type PointerState = {
+type Finger = {
+  id: number;
   x: number;
   y: number;
   vol: number;
   over: boolean;
-  seen: boolean;
   touching: boolean;
   pointerType: string;
   slowX: number;
   vibrato: number;
   trail: TrailPoint[];
+  order: number;
+  latched: boolean;
 };
 
 type Readout = {
@@ -49,6 +51,8 @@ type Readout = {
   status: string;
   live: boolean;
   seen: boolean;
+  fingers: number;
+  notes: string[];
 };
 
 type Settings = {
@@ -68,6 +72,8 @@ const IDLE: Readout = {
   status: "Tap to start",
   live: false,
   seen: false,
+  fingers: 0,
+  notes: [],
 };
 
 function isWave(value: unknown): value is WaveName {
@@ -94,22 +100,15 @@ export function Theremin() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<ThereminEngine | null>(null);
   const reduceMotion = useRef(false);
-  const vibSent = useRef(0);
   const shown = useRef("");
   const skipSave = useRef(true);
   const blockMouseUntil = useRef(0);
-  const pointer = useRef<PointerState>({
-    x: 0.5,
-    y: 0.45,
-    vol: 0.5,
-    over: false,
-    seen: false,
-    touching: false,
-    pointerType: "mouse",
-    slowX: 0.5,
-    vibrato: 0,
-    trail: [],
-  });
+  const orderRef = useRef(0);
+  const leadId = useRef<number | null>(null);
+  const focusX = useRef<number | null>(null);
+  const fingers = useRef<Map<number, Finger>>(new Map());
+  const firstGesture = useRef(true);
+  const armReveal = useRef<number | null>(null);
   const settings = useRef<Settings>({
     wave: "sine",
     reverb: 0.36,
@@ -124,22 +123,24 @@ export function Theremin() {
   const [armed, setArmed] = useState(false);
   const [readout, setReadout] = useState<Readout>(IDLE);
 
-  settings.current = { wave, reverb, muted, armed };
+  settings.current = { wave, reverb, muted, armed: armed || settings.current.armed };
 
   pushRef.current = () => {
     const engine = engineRef.current;
     if (!engine) return;
-    const p = pointer.current;
     const s = settings.current;
-    const audible = isAudible(p, s);
-    engine.setPerformance({
-      freq: describeX(p.x).freq,
-      volume: audible ? p.vol : 0,
-      waveform: s.wave,
-      reverb: s.reverb,
-      muted: s.muted,
-      vibratoCents: audible ? p.vibrato : 0,
-    });
+    engine.setFingers(
+      [...fingers.current.values()].filter(occupiesSlot).map((finger) => {
+        const audible = isAudible(finger, s);
+        return {
+          id: finger.id,
+          freq: describeX(finger.x).freq,
+          volume: audible ? finger.vol : 0,
+          vibratoCents: audible ? finger.vibrato : 0,
+        };
+      }),
+      { waveform: s.wave, reverb: s.reverb, muted: s.muted },
+    );
   };
 
   useEffect(() => {
@@ -188,48 +189,60 @@ export function Theremin() {
     const frame = (now: number) => {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
-      const p = pointer.current;
       const s = settings.current;
-      const tracking = p.seen && p.over && (p.pointerType === "mouse" || p.touching);
+      let audioDirty = false;
 
-      if (tracking) {
-        const follow = 1 - Math.exp(-dt * 18);
-        p.slowX += (p.x - p.slowX) * follow;
-        const wobble = Math.abs(p.x - p.slowX) * 36;
-        const target = Math.min(16, Math.max(0, (wobble - 0.02) * 58));
-        p.vibrato += (target - p.vibrato) * (1 - Math.exp(-dt * 10));
-      } else {
-        p.vibrato *= Math.exp(-dt * 8);
+      for (const finger of fingers.current.values()) {
+        const tracking = isPlaced(finger);
+        const before = finger.vibrato;
+        if (tracking) {
+          const follow = 1 - Math.exp(-dt * 18);
+          finger.slowX += (finger.x - finger.slowX) * follow;
+          const wobble = Math.abs(finger.x - finger.slowX) * 36;
+          const target = Math.min(16, Math.max(0, (wobble - 0.02) * 58));
+          finger.vibrato += (target - finger.vibrato) * (1 - Math.exp(-dt * 10));
+        } else {
+          finger.vibrato *= Math.exp(-dt * 8);
+        }
+        if (Math.abs(finger.vibrato - before) > 0.55) audioDirty = true;
+
+        for (const point of finger.trail) point.life *= Math.exp(-dt * 3.4);
+        if (finger.trail.some((point) => point.life <= 0.05)) {
+          finger.trail = finger.trail.filter((point) => point.life > 0.05);
+        }
       }
 
-      if (Math.abs(p.vibrato - vibSent.current) > 0.55) {
-        vibSent.current = p.vibrato;
-        pushRef.current();
-      }
-
-      for (const point of p.trail) point.life *= Math.exp(-dt * 3.4);
-      if (p.trail.length > 0 && p.trail.some((point) => point.life <= 0.05)) {
-        p.trail = p.trail.filter((point) => point.life > 0.05);
-      }
+      if (audioDirty) pushRef.current();
 
       const canvas = canvasRef.current;
+      const placed = placedFingers(fingers.current);
       if (canvas) {
-        const audible = isAudible(p, s);
+        const hands: HandVisual[] = placed.map((finger) => ({
+          x: finger.x,
+          y: finger.y,
+          vol: finger.vol,
+          over: true,
+          audible: isAudible(finger, s),
+          trail: finger.trail,
+        }));
+        const lead = pickLead(fingers.current, leadId.current);
+        if (lead) {
+          const index = placed.indexOf(lead);
+          if (index > 0) {
+            const [item] = hands.splice(index, 1);
+            hands.push(item);
+          }
+        }
         drawField(canvas, {
-          x: p.x,
-          y: p.y,
-          vol: p.vol,
-          over: p.over,
-          seen: p.seen,
-          audible,
+          hands,
+          focusX: focusX.current,
           muted: s.muted,
           reduceMotion: reduceMotion.current,
-          trail: p.trail,
         });
       }
 
-      const next = snapshot(p, s);
-      const key = `${next.note}|${next.hz}|${next.cents}|${next.volPct}|${next.status}|${next.live}|${next.seen}`;
+      const next = snapshot(fingers.current, leadId.current, focusX.current, s);
+      const key = `${next.note}|${next.hz}|${next.cents}|${next.volPct}|${next.status}|${next.live}|${next.seen}|${next.fingers}|${next.notes.join(",")}`;
       if (key !== shown.current) {
         shown.current = key;
         setReadout(next);
@@ -239,12 +252,25 @@ export function Theremin() {
     };
 
     raf = requestAnimationFrame(frame);
+    const field = fieldRef.current;
+    const unlock = () => {
+      engineRef.current ??= new ThereminEngine();
+      engineRef.current.ensure();
+    };
+    const listen: AddEventListenerOptions = { capture: true, passive: true };
+    field?.addEventListener("touchstart", unlock, listen);
+    field?.addEventListener("touchend", unlock, listen);
+    field?.addEventListener("click", unlock, listen);
     const onVis = () => {
       if (document.visibilityState === "visible") engineRef.current?.ensure();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelAnimationFrame(raf);
+      if (armReveal.current != null) window.clearTimeout(armReveal.current);
+      field?.removeEventListener("touchstart", unlock, listen);
+      field?.removeEventListener("touchend", unlock, listen);
+      field?.removeEventListener("click", unlock, listen);
       document.removeEventListener("visibilitychange", onVis);
       engineRef.current?.dispose();
       engineRef.current = null;
@@ -254,62 +280,190 @@ export function Theremin() {
   const ghostMouse = (event: { pointerType: string }) =>
     event.pointerType === "mouse" && performance.now() < blockMouseUntil.current;
 
-  const applyEvent = (event: ReactPointerEvent<HTMLDivElement>, entered: boolean) => {
+  const takeFinger = (event: { pointerId: number; pointerType: string }, allowCreate: boolean): Finger | null => {
+    const existing = fingers.current.get(event.pointerId);
+    if (existing) {
+      existing.pointerType = event.pointerType || existing.pointerType;
+      return existing;
+    }
+    if (!allowCreate) return null;
+    let used = 0;
+    for (const finger of fingers.current.values()) if (occupiesSlot(finger)) used += 1;
+    if (used >= MAX_VOICES) return null;
+    const finger: Finger = {
+      id: event.pointerId,
+      x: 0.5,
+      y: 0.45,
+      vol: 0,
+      over: false,
+      touching: false,
+      pointerType: event.pointerType || "mouse",
+      slowX: 0.5,
+      vibrato: 0,
+      trail: [],
+      order: ++orderRef.current,
+      latched: false,
+    };
+    fingers.current.set(finger.id, finger);
+    return finger;
+  };
+
+  const applyEvent = (event: ReactPointerEvent<HTMLDivElement>, entered: boolean, allowCreate: boolean) => {
     if (ghostMouse(event)) return;
     if (event.pointerType !== "mouse") blockMouseUntil.current = performance.now() + 800;
+    const finger = takeFinger(event, allowCreate);
+    if (!finger) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const inside =
       event.clientX >= rect.left &&
       event.clientX <= rect.right &&
       event.clientY >= rect.top &&
       event.clientY <= rect.bottom;
-    const p = pointer.current;
     if (!inside) {
-      p.over = false;
+      finger.over = false;
       pushRef.current();
       return;
     }
     const x = clamp01((event.clientX - rect.left) / rect.width);
     const y = clamp01((event.clientY - rect.top) / rect.height);
-    if (!p.over || entered) {
-      p.slowX = x;
-      p.vibrato = 0;
+    if (!finger.over || entered) {
+      finger.slowX = x;
+      finger.vibrato = 0;
     }
-    p.over = true;
-    p.seen = true;
-    p.x = x;
-    p.y = y;
-    p.vol = pointerToVol(y, rect.height);
-    p.pointerType = event.pointerType || p.pointerType;
+    finger.over = true;
+    finger.x = x;
+    finger.y = y;
+    finger.vol = pointerToVol(y, rect.height);
+    focusX.current = x;
+    leadId.current = finger.id;
     if (!reduceMotion.current) {
-      const lastPoint = p.trail[p.trail.length - 1];
+      const lastPoint = finger.trail[finger.trail.length - 1];
       if (!lastPoint || Math.hypot(lastPoint.x - x, lastPoint.y - y) > 0.006) {
-        p.trail.push({ x, y, life: 1 });
-        if (p.trail.length > 18) p.trail.shift();
+        finger.trail.push({ x, y, life: 1 });
+        if (finger.trail.length > 14) finger.trail.shift();
       }
     }
     pushRef.current();
+  };
+
+  const revealArmed = () => {
+    if (armReveal.current != null) {
+      window.clearTimeout(armReveal.current);
+      armReveal.current = null;
+    }
+    setArmed(true);
+  };
+
+  const queueReveal = () => {
+    if (armReveal.current != null) return;
+    armReveal.current = window.setTimeout(() => {
+      armReveal.current = null;
+      setArmed(true);
+    }, 700);
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (ghostMouse(event)) return;
     if (event.pointerType !== "mouse") {
       blockMouseUntil.current = performance.now() + 800;
-      event.currentTarget.setPointerCapture(event.pointerId);
+      for (const existing of [...fingers.current.values()]) {
+        if ((existing.latched || existing.id === -1) && !existing.touching) {
+          fingers.current.delete(existing.id);
+          if (leadId.current === existing.id) leadId.current = null;
+        }
+      }
     }
     engineRef.current ??= new ThereminEngine();
     engineRef.current.ensure();
-    pointer.current.touching = true;
-    pointer.current.pointerType = event.pointerType;
     settings.current.armed = true;
-    setArmed(true);
-    applyEvent(event, true);
+    const finger = takeFinger(event, true);
+    if (!finger) return;
+    finger.touching = true;
+    applyEvent(event, true, false);
+    if (firstGesture.current && event.pointerType !== "mouse") {
+      audibleEnough(finger, event.currentTarget.getBoundingClientRect().height);
+      pushRef.current();
+    }
+    queueReveal();
   };
 
-  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const onClick = (event: React.MouseEvent) => {
+    const opening = firstGesture.current;
+    engineRef.current ??= new ThereminEngine();
+    engineRef.current.ensure();
+    settings.current.armed = true;
+    revealArmed();
+    if (!opening) return;
+    firstGesture.current = false;
+    if ([...fingers.current.values()].some(occupiesSlot)) return;
+    const field = fieldRef.current;
+    if (!field) return;
+    const rect = field.getBoundingClientRect();
+    const x = clamp01((event.clientX - rect.left) / Math.max(1, rect.width));
+    const y = clamp01((event.clientY - rect.top) / Math.max(1, rect.height));
+    const finger: Finger = {
+      id: -1,
+      x,
+      y,
+      vol: pointerToVol(y, rect.height),
+      over: true,
+      touching: false,
+      pointerType: "mouse",
+      slowX: x,
+      vibrato: 0,
+      trail: [],
+      order: ++orderRef.current,
+      latched: true,
+    };
+    audibleEnough(finger, rect.height);
+    fingers.current.set(-1, finger);
+    focusX.current = x;
+    leadId.current = -1;
+    pushRef.current();
+  };
+
+  const releaseFinger = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (ghostMouse(event)) return;
-    pointer.current.touching = false;
-    applyEvent(event, false);
+    const finger = fingers.current.get(event.pointerId);
+    if (!finger) return;
+    if (finger.latched) {
+      finger.touching = false;
+      revealArmed();
+      engineRef.current?.ensure();
+      pushRef.current();
+      return;
+    }
+    const opening = firstGesture.current;
+    if (event.pointerType === "mouse") {
+      finger.touching = false;
+      applyEvent(event, false, false);
+      if (!opening) return;
+      firstGesture.current = false;
+      audibleEnough(finger, fieldRef.current?.getBoundingClientRect().height ?? 1);
+      settings.current.armed = true;
+      revealArmed();
+      engineRef.current?.ensure();
+      pushRef.current();
+      return;
+    }
+    if (opening) {
+      firstGesture.current = false;
+      finger.latched = true;
+      finger.touching = false;
+      finger.over = true;
+      audibleEnough(finger, fieldRef.current?.getBoundingClientRect().height ?? 1);
+      focusX.current = finger.x;
+      leadId.current = finger.id;
+      settings.current.armed = true;
+      revealArmed();
+      engineRef.current?.ensure();
+      pushRef.current();
+      return;
+    }
+    focusX.current = finger.x;
+    fingers.current.delete(event.pointerId);
+    if (leadId.current === event.pointerId) leadId.current = null;
+    pushRef.current();
   };
 
   const noteClass = !readout.seen ? "text-muted" : readout.live && readout.inTune ? "text-brass" : "text-fg";
@@ -320,7 +474,7 @@ export function Theremin() {
         <div>
           <h1 className="font-display text-4xl font-medium leading-none text-balance italic sm:text-5xl">Aether</h1>
           <p className="mt-2 max-w-md text-sm text-pretty text-muted">
-            Drag across for pitch. Higher in the field is louder.
+            Drag across for pitch. Higher is louder. Ten fingers play at once.
           </p>
         </div>
         <p className="shrink-0 text-xs uppercase tracking-widest text-brass">Theremin</p>
@@ -335,6 +489,13 @@ export function Theremin() {
             <span className="px-2">·</span>
             <span className={readout.seen && readout.inTune ? "text-brass" : "text-muted"}>{readout.tune}</span>
           </p>
+          {readout.notes.length > 1 && (
+            <p className="mt-2 flex max-w-md flex-wrap gap-x-2 gap-y-1 text-xs text-brass">
+              {readout.notes.map((name, index) => (
+                <span key={`${name}-${index}`}>{name}</span>
+              ))}
+            </p>
+          )}
           <div className="relative mt-3 h-3 w-40" aria-hidden="true">
             <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-line" />
             <div className="absolute top-1/2 left-1/2 h-2 w-px -translate-y-1/2 bg-muted" />
@@ -349,7 +510,15 @@ export function Theremin() {
             <span className={readout.live ? "live-dot size-2 rounded-full bg-brass" : "size-2 rounded-full bg-line"} />
             <span className={readout.live ? "text-brass" : "text-muted"}>{readout.status}</span>
           </p>
-          <p className="text-xs text-muted">C3 – C6</p>
+          <div className="flex gap-1 py-1" aria-hidden="true">
+            {Array.from({ length: MAX_VOICES }, (_, index) => (
+              <span
+                key={index}
+                className={`size-1.5 rounded-full ${index < readout.fingers ? "bg-brass" : "bg-line"}`}
+              />
+            ))}
+          </div>
+          <p className="text-xs text-muted">{readout.fingers > 0 ? `${readout.fingers} of ${MAX_VOICES}` : "C3 \u2013 C6"}</p>
         </div>
       </section>
 
@@ -374,28 +543,39 @@ export function Theremin() {
             ref={fieldRef}
             className="play-field relative min-w-0 flex-1 cursor-crosshair overflow-hidden rounded-2xl border border-line bg-field"
             role="application"
-            aria-label="Theremin field. Horizontal position sets pitch from C3 to C6. Higher is louder. The note scale at the bottom is silent."
+            aria-label="Theremin field. Up to ten fingers. Horizontal position sets pitch from C3 to C6. Higher is louder. The note scale at the bottom is silent."
             onPointerDown={onPointerDown}
-            onPointerMove={(event) => applyEvent(event, false)}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
+            onClick={onClick}
+            onPointerMove={(event) => applyEvent(event, false, event.pointerType === "mouse")}
+            onPointerUp={releaseFinger}
+            onPointerCancel={releaseFinger}
             onPointerEnter={(event) => {
               if (ghostMouse(event)) return;
-              if (event.pointerType === "mouse") applyEvent(event, true);
+              if (event.pointerType === "mouse") applyEvent(event, true, true);
             }}
             onPointerLeave={(event) => {
               if (ghostMouse(event)) return;
-              if (pointer.current.touching && event.pointerType !== "mouse") return;
-              pointer.current.over = false;
+              const finger = fingers.current.get(event.pointerId);
+              if (!finger || finger.latched) return;
+              if (finger.touching && event.pointerType !== "mouse") return;
+              focusX.current = finger.x;
+              fingers.current.delete(event.pointerId);
+              if (leadId.current === event.pointerId) leadId.current = null;
               pushRef.current();
             }}
             onContextMenu={(event) => event.preventDefault()}
           >
             <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" aria-hidden="true" />
             {!armed && (
-              <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center px-3">
-                <p className="rounded-full border border-line bg-surface px-4 py-2 text-sm">Tap or click to start the sound</p>
-              </div>
+              <button
+                type="button"
+                className="absolute inset-0 z-10 flex touch-none items-start justify-center bg-transparent pt-3"
+                aria-label="Start the sound"
+              >
+                <span className="rounded-full border border-line bg-surface px-4 py-2 text-sm text-fg">
+                  Tap or click to start the sound
+                </span>
+              </button>
             )}
           </div>
         </div>
@@ -467,24 +647,61 @@ export function Theremin() {
   );
 }
 
-function isAudible(p: PointerState, s: Settings): boolean {
-  return s.armed && p.over && !s.muted && p.vol > 0.004 && (p.pointerType === "mouse" || p.touching);
+function audibleEnough(finger: Finger, height: number): void {
+  if (finger.vol > 0.004) return;
+  finger.y = 0.42;
+  finger.vol = pointerToVol(0.42, height);
 }
 
-function snapshot(p: PointerState, s: Settings): Readout {
-  if (!p.seen) return IDLE;
-  const pitch = describeX(p.x);
-  const audible = isAudible(p, s);
-  const status = !s.armed ? "Tap to start" : s.muted ? "Muted" : audible ? "Live" : "Silent";
+function isPlaced(finger: Finger): boolean {
+  return finger.over && (finger.pointerType === "mouse" || finger.touching || finger.latched);
+}
+
+function occupiesSlot(finger: Finger): boolean {
+  return finger.touching || finger.latched || (finger.pointerType === "mouse" && finger.over);
+}
+
+function isAudible(finger: Finger, settings: Settings): boolean {
+  return settings.armed && isPlaced(finger) && !settings.muted && finger.vol > 0.004;
+}
+
+function placedFingers(map: Map<number, Finger>): Finger[] {
+  return [...map.values()].filter(isPlaced).sort((a, b) => a.order - b.order);
+}
+
+function pickLead(map: Map<number, Finger>, lead: number | null): Finger | null {
+  const current = lead != null ? map.get(lead) : undefined;
+  if (current && isPlaced(current)) return current;
+  const placed = placedFingers(map);
+  return placed.length > 0 ? placed[placed.length - 1] : null;
+}
+
+function snapshot(map: Map<number, Finger>, lead: number | null, focus: number | null, settings: Settings): Readout {
+  const placed = placedFingers(map);
+  const active = pickLead(map, lead);
+  const x = active ? active.x : focus;
+  if (x == null) return IDLE;
+  const pitch = describeX(x);
+  const audible = placed.filter((finger) => isAudible(finger, settings));
+  const notes: string[] = [];
+  for (const finger of [...audible].sort((a, b) => a.x - b.x)) {
+    const name = describeX(finger.x).name;
+    if (!notes.includes(name)) notes.push(name);
+  }
+  const count = placed.length;
+  const status = !settings.armed ? "Tap to start" : settings.muted ? "Muted" : audible.length > 1 ? `${audible.length} fingers` : audible.length === 1 ? "Live" : "Silent";
+  const vol = placed.reduce((max, finger) => Math.max(max, finger.vol), 0);
   return {
     note: pitch.name,
     hz: String(Math.round(pitch.freq)),
     tune: tunePhrase(pitch.cents),
     cents: pitch.cents,
     inTune: pitch.inTune,
-    volPct: Math.round((p.over ? p.vol : 0) * 100),
+    volPct: Math.round(vol * 100),
     status,
-    live: audible,
+    live: audible.length > 0,
     seen: true,
+    fingers: count,
+    notes,
   };
 }
