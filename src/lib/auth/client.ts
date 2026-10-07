@@ -152,7 +152,6 @@ export async function signIn(
   if (data?.url) window.location.href = data.url;
 }
 
-
 /**
  * Open `/auth/popup` in a new window. Must run synchronously inside the click
  * handler (no await before this). The path is served by the template Vite
@@ -206,7 +205,6 @@ function waitForPopupToken(popup: Window): Promise<string | null> {
     window.addEventListener("message", onMessage);
   });
 }
-
 
 /**
  * Sign out of THIS app's local session, clear the preview token, then redirect.
