@@ -59,8 +59,8 @@ type Settings = {
 };
 
 const IDLE: Readout = {
-  note: "\u2014",
-  hz: "\u2014",
+  note: "—",
+  hz: "—",
   tune: "Move in the field",
   cents: 0,
   inTune: false,
@@ -332,7 +332,7 @@ export function Theremin() {
           <p className="mt-2 text-sm tabular-nums text-muted">
             <span className={readout.seen ? "text-fg" : "text-muted"}>{readout.hz}</span>
             <span> Hz</span>
-            <span className="px-2">\u00b7</span>
+            <span className="px-2">·</span>
             <span className={readout.seen && readout.inTune ? "text-brass" : "text-muted"}>{readout.tune}</span>
           </p>
           <div className="relative mt-3 h-3 w-40" aria-hidden="true">
@@ -349,7 +349,7 @@ export function Theremin() {
             <span className={readout.live ? "live-dot size-2 rounded-full bg-brass" : "size-2 rounded-full bg-line"} />
             <span className={readout.live ? "text-brass" : "text-muted"}>{readout.status}</span>
           </p>
-          <p className="text-xs text-muted">C3 \u2013 C6</p>
+          <p className="text-xs text-muted">C3 – C6</p>
         </div>
       </section>
 
